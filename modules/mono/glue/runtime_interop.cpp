@@ -696,11 +696,13 @@ double godotsharp_variant_as_float(const Variant *p_self) {
 	return p_self->operator double();
 }
 
-godot_string godotsharp_variant_as_string(const Variant *p_self) {
-	godot_string raw_dest;
-	String *dest = (String *)&raw_dest;
+// Returned through a pointer, not by value: the WebAssembly C ABI returns a struct
+// in a register only when it holds one scalar, which these do not, while their C#
+// counterparts do -- so a by-value return disagrees about the function's type and
+// traps the browser on the first call.
+void godotsharp_variant_as_string(const Variant *p_self, godot_string *r_dest) {
+	String *dest = (String *)r_dest;
 	memnew_placement(dest, String(p_self->operator String()));
-	return raw_dest;
 }
 
 godot_vector2 godotsharp_variant_as_vector2(const Variant *p_self) {
@@ -815,25 +817,31 @@ godot_color godotsharp_variant_as_color(const Variant *p_self) {
 	return raw_dest;
 }
 
-godot_string_name godotsharp_variant_as_string_name(const Variant *p_self) {
-	godot_string_name raw_dest;
-	StringName *dest = (StringName *)&raw_dest;
+// Returned through a pointer, not by value: the WebAssembly C ABI returns a struct
+// in a register only when it holds one scalar, which these do not, while their C#
+// counterparts do -- so a by-value return disagrees about the function's type and
+// traps the browser on the first call.
+void godotsharp_variant_as_string_name(const Variant *p_self, godot_string_name *r_dest) {
+	StringName *dest = (StringName *)r_dest;
 	memnew_placement(dest, StringName(p_self->operator StringName()));
-	return raw_dest;
 }
 
-godot_node_path godotsharp_variant_as_node_path(const Variant *p_self) {
-	godot_node_path raw_dest;
-	NodePath *dest = (NodePath *)&raw_dest;
+// Returned through a pointer, not by value: the WebAssembly C ABI returns a struct
+// in a register only when it holds one scalar, which these do not, while their C#
+// counterparts do -- so a by-value return disagrees about the function's type and
+// traps the browser on the first call.
+void godotsharp_variant_as_node_path(const Variant *p_self, godot_node_path *r_dest) {
+	NodePath *dest = (NodePath *)r_dest;
 	memnew_placement(dest, NodePath(p_self->operator NodePath()));
-	return raw_dest;
 }
 
-godot_rid godotsharp_variant_as_rid(const Variant *p_self) {
-	godot_rid raw_dest;
-	RID *dest = (RID *)&raw_dest;
+// Returned through a pointer, not by value: the WebAssembly C ABI returns a struct
+// in a register only when it holds one scalar, which these do not, while their C#
+// counterparts do -- so a by-value return disagrees about the function's type and
+// traps the browser on the first call.
+void godotsharp_variant_as_rid(const Variant *p_self, godot_rid *r_dest) {
+	RID *dest = (RID *)r_dest;
 	memnew_placement(dest, RID(p_self->operator ::RID()));
-	return raw_dest;
 }
 
 godot_callable godotsharp_variant_as_callable(const Variant *p_self) {
@@ -850,18 +858,22 @@ godot_signal godotsharp_variant_as_signal(const Variant *p_self) {
 	return raw_dest;
 }
 
-godot_dictionary godotsharp_variant_as_dictionary(const Variant *p_self) {
-	godot_dictionary raw_dest;
-	Dictionary *dest = (Dictionary *)&raw_dest;
+// Returned through a pointer, not by value: the WebAssembly C ABI returns a struct
+// in a register only when it holds one scalar, which these do not, while their C#
+// counterparts do -- so a by-value return disagrees about the function's type and
+// traps the browser on the first call.
+void godotsharp_variant_as_dictionary(const Variant *p_self, godot_dictionary *r_dest) {
+	Dictionary *dest = (Dictionary *)r_dest;
 	memnew_placement(dest, Dictionary(p_self->operator Dictionary()));
-	return raw_dest;
 }
 
-godot_array godotsharp_variant_as_array(const Variant *p_self) {
-	godot_array raw_dest;
-	Array *dest = (Array *)&raw_dest;
+// Returned through a pointer, not by value: the WebAssembly C ABI returns a struct
+// in a register only when it holds one scalar, which these do not, while their C#
+// counterparts do -- so a by-value return disagrees about the function's type and
+// traps the browser on the first call.
+void godotsharp_variant_as_array(const Variant *p_self, godot_array *r_dest) {
+	Array *dest = (Array *)r_dest;
 	memnew_placement(dest, Array(p_self->operator Array()));
-	return raw_dest;
 }
 
 godot_packed_array godotsharp_variant_as_packed_byte_array(const Variant *p_self) {
