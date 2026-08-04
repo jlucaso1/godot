@@ -22,6 +22,45 @@ namespace GodotTools.Export
 
         private List<string> _tempFolders = new List<string>();
 
+        // The publish copies the runtime pack's native directory wholesale. None of it is
+        // reachable from a Web export, since the template has the runtime linked in, so it
+        // is dropped from the exported payload.
+        //
+        // Only names no application would plausibly own. Dropping a file the project meant
+        // to publish costs correctness -- managed code cannot find it under
+        // AppContext.BaseDirectory -- while keeping one only costs a few bytes, so generic
+        // names the runtime pack also uses, runtime.c and emcc-link.rsp among them, are
+        // deliberately left in. Its include/ and src/ directories are kept for the same
+        // reason, though they are the pack's too and worth about half a megabyte.
+        //
+        // The one extension excluded at the publish root. Nearly all of the weight is here:
+        // twenty-six static archives at 25.6 MiB, against 0.8 MiB for everything else the
+        // pack leaves behind, and a static library is not something a game publishes as
+        // content. Anything cheaper than that is matched by name below instead of by
+        // extension, since .map and .ts in particular are as likely to be a project's level
+        // data or a video stream as they are the pack's.
+        private static readonly HashSet<string> _webRuntimePackDeadExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".a",
+        };
+
+        private static readonly HashSet<string> _webRuntimePackLeftovers = new(StringComparer.Ordinal)
+        {
+            // The .NET JavaScript host and its wasm module. The engine is the host here,
+            // so none of it is loaded, but the publish copies it regardless.
+            "dotnet.js",
+            "dotnet.runtime.js",
+            "dotnet.native.js",
+            "dotnet.native.wasm",
+            "dotnet.globalization.js",
+
+            // That host's debug and authoring output, which nothing loads either.
+            "dotnet.js.map",
+            "dotnet.runtime.js.map",
+            "dotnet.native.js.symbols",
+            "dotnet.d.ts",
+        };
+
         private static bool ProjectContainsDotNet()
         {
             return File.Exists(GodotSharpDirs.ProjectSlnPath);
@@ -179,7 +218,7 @@ namespace GodotTools.Export
             if (!TryDeterminePlatformFromOSName(osName, out string? platform))
                 throw new NotSupportedException("Target platform not supported.");
 
-            if (!new[] { OS.Platforms.Windows, OS.Platforms.LinuxBSD, OS.Platforms.MacOS, OS.Platforms.Android, OS.Platforms.iOS }
+            if (!new[] { OS.Platforms.Windows, OS.Platforms.LinuxBSD, OS.Platforms.MacOS, OS.Platforms.Android, OS.Platforms.iOS, OS.Platforms.Web }
                     .Contains(platform))
             {
                 throw new NotImplementedException("Target platform not yet implemented.");
@@ -216,6 +255,11 @@ namespace GodotTools.Export
                 publishConfig.Archs.Add("arm32");
             }
 
+            if (features.Contains("wasm32"))
+            {
+                publishConfig.Archs.Add("wasm32");
+            }
+
             if (features.Contains("universal"))
             {
                 if (platform == OS.Platforms.MacOS)
@@ -242,7 +286,11 @@ namespace GodotTools.Export
 
             List<string> outputPaths = new();
 
-            bool embedBuildResults = ((bool)GetOption("dotnet/embed_build_outputs") || platform == OS.Platforms.Android) && platform != OS.Platforms.MacOS;
+            // Web is like Android: the engine can only read the pck, so the managed payload has
+            // to be inside it rather than sitting next to the exported page.
+            bool embedBuildResults = ((bool)GetOption("dotnet/embed_build_outputs")
+                || platform == OS.Platforms.Android
+                || platform == OS.Platforms.Web) && platform != OS.Platforms.MacOS;
 
             var exportedJars = new HashSet<string>();
 
@@ -310,6 +358,43 @@ namespace GodotTools.Export
                     if (!config.BundleOutputs)
                         continue;
 
+                    if (platform == OS.Platforms.Web)
+                    {
+                        // Every other platform enters managed code through GodotPlugins.Game.Main,
+                        // which a source generator emits into the game's own assembly, so
+                        // GodotPlugins itself is never shipped. WebAssembly needs a trampoline
+                        // generated ahead of time from the assembly holding the entry point, and
+                        // the game's assembly does not exist when the template is built, so the
+                        // Web template enters through GodotPlugins.Main instead. That means the
+                        // editor's own GodotPlugins.dll has to travel with the project.
+                        // Sibling of the editor's Tools directory; which build configuration the
+                        // editor shipped its API assemblies in is not worth asserting, so take
+                        // whichever is there.
+                        string apiBaseDir = Path.Combine(
+                            Path.GetDirectoryName(GodotSharpDirs.DataEditorToolsDir.TrimEnd('/', '\\'))!, "Api");
+                        string? godotPluginsSource = new[] { "Debug", "Release" }
+                            .Select(buildConfigDir => Path.Combine(apiBaseDir, buildConfigDir, "GodotPlugins.dll"))
+                            .FirstOrDefault(File.Exists);
+
+                        if (godotPluginsSource is null)
+                        {
+                            throw new NotSupportedException(
+                                $"Web export needs GodotPlugins.dll, which was not found under '{apiBaseDir}'.");
+                        }
+                        // The publish may already have put something there. Copying over it
+                        // would replace the project's own assembly, or a dependency, with the
+                        // editor's, and the export would look fine until it ran.
+                        string godotPluginsTarget = Path.Combine(publishOutputDir, "GodotPlugins.dll");
+                        if (File.Exists(godotPluginsTarget))
+                        {
+                            throw new NotSupportedException(
+                                "Web export needs to add its own GodotPlugins.dll, but the published "
+                                + $"project already contains one at '{godotPluginsTarget}'. Rename the "
+                                + "assembly or dependency that produces it.");
+                        }
+                        File.Copy(godotPluginsSource, godotPluginsTarget);
+                    }
+
                     var manifest = new StringBuilder();
 
                     // Add to the exported project shared object list or packed resources.
@@ -330,6 +415,42 @@ namespace GodotTools.Export
                             {
                                 // Exclude the dylib artifact, since it's included separately as an xcframework.
                                 return Path.GetFileName(file) != $"{GodotSharpDirs.ProjectAssemblyName}.dylib";
+                            }
+
+                            if (platform == OS.Platforms.Web)
+                            {
+                                // The publish drags along the runtime pack's own host: dotnet.native.wasm
+                                // and the JavaScript that loads it. The export template has the runtime
+                                // linked in and never uses either, and dotnet.native.wasm alone is
+                                // several megabytes of dead payload.
+                                //
+                                // Matched on extension as well as prefix, so that a managed assembly
+                                // whose name happens to start with "dotnet." is not dropped with them.
+                                //
+                                // Only at the publish root, where the runtime pack drops them. A
+                                // project is free to publish content of its own called
+                                // assets/runtime.c, and dropping that would leave managed code
+                                // unable to find it under AppContext.BaseDirectory.
+                                if (!string.Equals(Path.GetDirectoryName(file), publishOutputDir,
+                                        StringComparison.Ordinal))
+                                {
+                                    return true;
+                                }
+
+                                // A browser cannot load a static library, and no game reads one
+                                // at run time, so these are unambiguously the runtime pack's:
+                                // 26 MB of libmonosgen, libicu and friends that the template
+                                // already has linked in, downloaded by every player for nothing.
+                                // The rest are the pack's build and debug leavings.
+                                if (_webRuntimePackDeadExtensions.Contains(Path.GetExtension(file)))
+                                {
+                                    return false;
+                                }
+
+                                // Named exactly, never matched by prefix: a project is free to
+                                // publish content of its own called dotnet.settings.js, and
+                                // dropping that would leave managed code unable to find it.
+                                return !_webRuntimePackLeftovers.Contains(Path.GetFileName(file));
                             }
 
                             return true;
@@ -510,6 +631,9 @@ namespace GodotTools.Export
                 "arm64-v8a" => "arm64",
                 "arm32" => "arm",
                 "arm64" => "arm64",
+                // The .NET `browser-wasm` runtime pack is wasm32-only, and the RID arch is
+                // spelled "wasm" rather than "wasm32".
+                "wasm32" => "wasm",
                 _ => throw new ArgumentOutOfRangeException(nameof(arch), arch, "Unexpected architecture")
             };
         }

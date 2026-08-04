@@ -91,6 +91,9 @@ def get_flags():
         # run-time performance.
         # Note that this overrides the "auto" behavior for target/dev_build.
         "optimize": "size",
+        # The Mono runtime is statically linked into the engine module rather than loaded
+        # dynamically. wasm32 only, since the .NET `browser-wasm` pack is wasm32-only.
+        "supported": ["mono"],
     }
 
 

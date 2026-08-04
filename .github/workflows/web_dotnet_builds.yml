@@ -1,0 +1,493 @@
+name: 🌐 Web .NET Builds
+on:
+  workflow_call:
+  workflow_dispatch:
+
+# Separate from web_builds.yml, which never passes module_mono_enabled and so would stay
+# green whatever happened to this code path.
+#
+# The .NET browser-wasm runtime pack is wasm32-only, built without WebAssembly atomics and
+# not position-independent, hence threads, wasm64 and dlink being pinned off here.
+env:
+  SCONS_FLAGS: >-
+    module_mono_enabled=yes
+    threads=no
+    arch=wasm32
+    dlink_enabled=no
+    debug_symbols=no
+  EM_VERSION: 4.0.11
+  DOTNET_VERSION: 9.0.x
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
+
+jobs:
+  web-dotnet-template:
+    runs-on: ubuntu-24.04
+    name: ${{ matrix.name }}
+    # The desktop jobs' figure rather than this platform's 60: the same job builds a
+    # linuxbsd editor and the managed assemblies before it gets to the template.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Template w/ .NET, release (target=template_release)
+            cache-name: web-dotnet-template
+            target: template_release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Set up Emscripten
+        uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: ${{ env.EM_VERSION }}
+          no-cache: true
+
+      - name: Verify Emscripten setup
+        run: |
+          emcc -v
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # Supplies PInvokeTableGenerator. `restore` rather than `install wasm-tools`: the
+      # workload's name depends on the SDK selected, and a runner image newer than the
+      # target framework resolves it as wasm-tools-net9, failing with NETSDK1147.
+      - name: Install the WebAssembly workload
+        run: |
+          dotnet workload restore modules/mono/runtime/GetRuntimePack/GetRuntimePack.csproj
+          dotnet workload list
+
+      - name: Restore editor build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: ${{ matrix.cache-name }}-editor
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      # The interop tables have to cover GodotSharp and GodotPlugins, and those need glue
+      # that only an editor can generate. Without them the template still links and CI
+      # still passes, but nothing can enter managed code -- so this is a prerequisite of
+      # the job meaning anything, not an optimization.
+      - name: Build the editor, to generate the glue
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: module_mono_enabled=yes debug_symbols=no
+          platform: linuxbsd
+          target: editor
+
+      - name: Save editor build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: ${{ matrix.cache-name }}-editor
+        continue-on-error: true
+
+      - name: Build Godot's managed assemblies
+        run: |
+          set -eu
+          bin/godot.linuxbsd.editor.x86_64.mono --headless --generate-mono-glue modules/mono/glue
+          python modules/mono/build_scripts/build_assemblies.py \
+            --godot-output-dir=./bin --godot-platform=linuxbsd \
+            --push-nupkgs-local="$PWD/bin/GodotSharp/nupkgs"
+          ls -l bin/GodotSharp/Api/Release/GodotSharp.dll bin/GodotSharp/Api/Release/GodotPlugins.dll
+
+      # Nothing else here builds a project against Godot.NET.Sdk: GetRuntimePack uses
+      # Microsoft.NET.Sdk, and an export resolves whichever package is already installed.
+      # An SDK that cannot even be imported therefore passes every other check, which is
+      # how a malformed Sdk.targets once survived several commits. This asks MSBuild.
+      - name: Check the generated Godot.NET.Sdk is usable
+        run: |
+          set -eu
+          VERSION=$(sed -n 's:.*<PackageVersion_Godot_NET_Sdk>\(.*\)</PackageVersion_Godot_NET_Sdk>.*:\1:p' \
+            modules/mono/SdkPackageVersions.props)
+          echo "Godot.NET.Sdk version: $VERSION"
+          WORK=$(mktemp -d)
+          cat > "$WORK/NuGet.config" <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <add key="godot-local" value="$PWD/bin/GodotSharp/nupkgs" />
+            </packageSources>
+          </configuration>
+          XML
+          cat > "$WORK/SdkSmokeTest.csproj" <<XML
+          <Project Sdk="Godot.NET.Sdk/$VERSION">
+            <PropertyGroup>
+              <TargetFramework>net8.0</TargetFramework>
+              <TargetFramework Condition=" '\$(GodotTargetPlatform)' == 'web' ">net9.0</TargetFramework>
+            </PropertyGroup>
+          </Project>
+          XML
+          # Importing the SDK at all is the point; the resolved framework proves the Web
+          # property group was read rather than skipped over.
+          RESOLVED=$(dotnet msbuild "$WORK/SdkSmokeTest.csproj" \
+            -p:GodotTargetPlatform=web -getProperty:TargetFramework | tail -1 | tr -d '[:space:]')
+          echo "TargetFramework for web: $RESOLVED"
+          if [ "$RESOLVED" != "net9.0" ]; then
+            echo "::error::Godot.NET.Sdk resolved '$RESOLVED' for a Web build, expected net9.0"
+            exit 1
+          fi
+
+      # mono_configure.py can do this itself, but running it here keeps a failure
+      # attributable to this step instead of surfacing inside the SCons run.
+      - name: Generate .NET interop tables
+        run: |
+          set -eu
+          dotnet publish modules/mono/runtime/GetRuntimePack \
+            -r browser-wasm --self-contained -c Release \
+            -p:GodotApiDir="$PWD/bin/GodotSharp/Api/Release"
+          TABLES=modules/mono/runtime/GetRuntimePack/obj/Release/net9.0/browser-wasm/wasm/for-publish
+          ls -l "$TABLES/pinvoke-table.h" "$TABLES/emcc-link.rsp"
+          # The entry point the Web template enters managed code through. Its absence is
+          # the one failure that otherwise links, runs, and does nothing.
+          if ! grep -q "GodotPlugins_Main_InitializeFromEngine" "$TABLES/pinvoke-table.h"; then
+            echo "::error::pinvoke-table.h has no trampoline for GodotPlugins.Main::InitializeFromEngine"
+            exit 1
+          fi
+          echo "wasm_native_to_interp_map entries: $(grep -c 'wasm_native_to_interp_' "$TABLES/pinvoke-table.h")"
+          # Hand the location to the build, so it does not repeat this work.
+          echo "GODOT_DOTNET_WASM_TABLES=$PWD/$TABLES" >> "$GITHUB_ENV"
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Compilation
+        uses: ./.github/actions/godot-build
+        with:
+          scons-flags: ${{ env.SCONS_FLAGS }}
+          platform: web
+          target: ${{ matrix.target }}
+
+      # The link succeeding is itself the proof: gd_mono.cpp references
+      # mono_wasm_load_runtime_common and friends, which have no source other than the
+      # runtime pack archives. So this only confirms the artifacts exist.
+      #
+      # Deliberately no size or import-count thresholds -- a .NET template is ~41.2 MiB
+      # against ~38.6 MiB without, so any stable threshold passes for both. Grepping the
+      # binary for mono_* proves nothing either: release builds strip and minify names.
+      - name: Verify the template artifacts were produced
+        run: |
+          set -eu
+          MONO_WASM=bin/godot.web.${{ matrix.target }}.wasm32.nothreads.mono.wasm
+          MONO_ZIP=bin/godot.web.${{ matrix.target }}.wasm32.nothreads.mono.zip
+          ls -l bin/
+          for artifact in "$MONO_WASM" "$MONO_ZIP"; do
+            if [ ! -f "$artifact" ]; then
+              echo "::error::expected artifact $artifact was not produced"
+              exit 1
+            fi
+          done
+          # The ".mono." infix only appears when module_mono_enabled=yes took effect.
+          echo "wasm: $(stat -c%s "$MONO_WASM") bytes, zip: $(stat -c%s "$MONO_ZIP") bytes"
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      # Everything above proves the template builds and links. None of it runs it, and the
+      # failures this platform actually produces are runtime ones: a managed call whose ABI
+      # disagrees traps the browser, an unregistered internal call reports the runtime as
+      # out of sync, a marshaler that writes the wrong shape hands managed code garbage. A
+      # template with any of those still compiles, links, and passes every check above.
+      #
+      # So this exports a project and runs it, asserting on what the game prints. Each
+      # assertion below corresponds to a defect that was live in this branch at some point
+      # and produced a green build while broken.
+      - name: Export a project and run it in a browser
+        run: |
+          set -eu
+          PROJECT=$(mktemp -d)/CiTest
+          mkdir -p "$PROJECT"
+
+          cat > "$PROJECT/project.godot" <<'CFG'
+          config_version=5
+
+          [application]
+
+          config/name="CiTest"
+          run/main_scene="res://main.tscn"
+          config/features=PackedStringArray("4.5", "C#")
+          CFG
+
+          cat > "$PROJECT/main.tscn" <<'SCN'
+          [gd_scene load_steps=2 format=3]
+
+          [ext_resource type="Script" path="res://Main.cs" id="1"]
+
+          [node name="Main" type="Node"]
+          script = ExtResource("1")
+          SCN
+
+          cat > "$PROJECT/Main.cs" <<'CS'
+          using System;
+          using System.Globalization;
+          using System.Runtime.InteropServices.JavaScript;
+          using Godot;
+
+          public partial class Main : Node
+          {
+              // Bound and invoked below. The page defines it on globalThis.
+              [JSImport("ciThrow")]
+              internal static partial void CiThrow();
+
+              // Nothing can reach this from JavaScript -- the host API that would expose an
+              // assembly's exports is not part of this template -- but declaring one has to
+              // build and load, which is what a project that tries would otherwise find out
+              // the hard way.
+              [JSExport]
+              internal static string ExportedToJs(string who) => "hello " + who;
+
+              // GD.Print, not Console.WriteLine: the engine routes its own output to the
+              // browser console, and whether System.Console reaches it is not something to
+              // rest the whole check on.
+              private static void Check(string name, Func<string> body)
+              {
+                  try
+                  {
+                      GD.Print("[ci] " + name + "=" + body());
+                  }
+                  catch (Exception e)
+                  {
+                      GD.Print("[ci] " + name + "=THREW " + e.GetType().Name + ": " + e.Message);
+                  }
+              }
+
+              public override void _Ready()
+              {
+                  // Pointer-sized interop returns. These are the six calls whose C++ and C#
+                  // declarations disagreed under the wasm32 ABI, trapping the browser.
+                  Check("variant", () =>
+                  {
+                      Variant v = Variant.CreateFrom("hello");
+                      StringName sn = "sn";
+                      NodePath np = "np";
+                      var dict = new Godot.Collections.Dictionary { { "k", 1 } };
+                      var arr = new Godot.Collections.Array { 1, 2 };
+                      return v.AsString() + "/" + sn + "/" + np + "/" + dict.Count + "/" + arr.Count;
+                  });
+
+                  // ICU is loaded and in use. Under invariant globalization the Turkish
+                  // uppercase of "i" is "I" rather than the dotted capital, so this single
+                  // value distinguishes real cultures from the invariant fallback.
+                  Check("turkish", () => "i".ToUpper(new CultureInfo("tr-TR")));
+
+                  // The bundled time zone database, not just the TZ the browser reports:
+                  // a fixed zone with a fixed offset, so the runner's own zone cannot
+                  // make this pass by accident.
+                  Check("tz", () => TimeZoneInfo.FindSystemTimeZoneById("America/Sao_Paulo")
+                      .BaseUtcOffset.TotalHours.ToString(CultureInfo.InvariantCulture));
+
+                  // A [JSImport] that throws. The message and its length are both asserted
+                  // because this path once delivered the right text followed by megabytes
+                  // of adjacent heap, which reads as working unless the length is checked.
+                  Check("jsexc", () =>
+                  {
+                      try
+                      {
+                          CiThrow();
+                          return "did not throw";
+                      }
+                      catch (Exception e)
+                      {
+                          return $"{e.Message}|{e.Message.Length}";
+                      }
+                  });
+
+                  // A [JSExport] compiles and loads. Called from managed code, that being
+                  // the only side able to reach it here.
+                  Check("jsexport", () => ExportedToJs("web"));
+
+                  // A NuGet dependency, which exercises more of the pipeline than the
+                  // framework does: the package has to restore, publish into the payload,
+                  // survive packing, be extracted and resolve at run time. A standard
+                  // CRC-32, so the expected value cross-checks against any other
+                  // implementation rather than against this one.
+                  Check("nuget", () => System.IO.Hashing.Crc32.HashToUInt32(
+                      System.Text.Encoding.UTF8.GetBytes("godot")).ToString("x8"));
+
+                  // Arguments reach managed code, as they do on every other platform.
+                  // Qualified: Godot.Environment is in scope through `using Godot`.
+                  Check("args", () => string.Join(",", System.Environment.GetCommandLineArgs()[1..]));
+
+                  Console.WriteLine("[ci] ok");
+              }
+          }
+          CS
+
+          SDK_VERSION=$(sed -n 's:.*<PackageVersion_Godot_NET_Sdk>\(.*\)</PackageVersion_Godot_NET_Sdk>.*:\1:p' \
+            modules/mono/SdkPackageVersions.props)
+          cat > "$PROJECT/CiTest.csproj" <<XML
+          <Project Sdk="Godot.NET.Sdk/$SDK_VERSION">
+            <PropertyGroup>
+              <TargetFramework>net8.0</TargetFramework>
+              <TargetFramework Condition=" '\$(GodotTargetPlatform)' == 'web' ">net9.0</TargetFramework>
+              <EnableDynamicLoading>true</EnableDynamicLoading>
+              <!-- Required by [JSImport]; without it the generator fails with SYSLIB1074. -->
+              <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="System.IO.Hashing" Version="9.0.0" />
+            </ItemGroup>
+          </Project>
+          XML
+          # Only its existence is checked, to decide the project is a C# one.
+          printf 'Microsoft Visual Studio Solution File, Format Version 12.00\n' > "$PROJECT/CiTest.sln"
+          cat > "$PROJECT/NuGet.config" <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="godot-local" value="$PWD/bin/GodotSharp/nupkgs" />
+              <add key="nuget" value="https://api.nuget.org/v3/index.json" />
+            </packageSources>
+          </configuration>
+          XML
+          cat > "$PROJECT/export_presets.cfg" <<CFG
+          [preset.0]
+
+          name="Web"
+          platform="Web"
+          runnable=true
+          export_path="$PROJECT/out/index.html"
+
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter=""
+
+          [preset.0.options]
+
+          custom_template/debug=""
+          custom_template/release="$PWD/bin/godot.web.${{ matrix.target }}.wasm32.nothreads.mono.zip"
+          variant/extensions_support=false
+          variant/thread_support=false
+          CFG
+
+          GODOT=$PWD/bin/godot.linuxbsd.editor.x86_64.mono
+          mkdir -p "$PROJECT/out"
+          # Imported first: a fresh project has no .godot, and exporting one would resolve
+          # the scene before the script is known.
+          "$GODOT" --headless --path "$PROJECT" --import
+          "$GODOT" --headless --path "$PROJECT" --export-release Web "$PROJECT/out/index.html"
+
+          if [ ! -s "$PROJECT/out/index.pck" ]; then
+            echo "::error::export produced no pck"
+            exit 1
+          fi
+          # A pck without the managed payload is a few kilobytes and still exports cleanly.
+          PCK_SIZE=$(stat -c%s "$PROJECT/out/index.pck")
+          echo "pck: $PCK_SIZE bytes"
+          if [ "$PCK_SIZE" -lt 1000000 ]; then
+            echo "::error::pck is $PCK_SIZE bytes, too small to contain the managed payload"
+            exit 1
+          fi
+
+          # The function the [JSImport] above resolves, and the arguments the engine passes
+          # on to managed code. Both are what a real page's engine configuration supplies.
+          python3 - "$PROJECT/out/index.html" <<'PY'
+          import sys
+          path = sys.argv[1]
+          page = open(path).read()
+          assert '"args":[]' in page, "engine config args not found in the exported page"
+          page = page.replace('"args":[]', '"args":["--ci-marker"]', 1)
+          page = page.replace(
+              "</head>",
+              "<script>globalThis.ciThrow = function () { throw new Error('boom'); };</script>\n</head>",
+              1,
+          )
+          open(path, "w").write(page)
+          PY
+
+          # Emscripten needs application/wasm; http.server on this image does not know the
+          # extension and serves it as octet-stream, which the browser refuses to compile.
+          cat > "$PROJECT/serve.py" <<'PY'
+          import http.server, sys
+          http.server.SimpleHTTPRequestHandler.extensions_map['.wasm'] = 'application/wasm'
+          http.server.test(HandlerClass=http.server.SimpleHTTPRequestHandler, port=int(sys.argv[1]), bind='127.0.0.1')
+          PY
+          # Refused rather than shared. A server already holding the port would be served
+          # to the browser instead of this export, and every assertion below would then be
+          # about some other build -- passing or failing for reasons unrelated to this run.
+          if python3 -c "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('127.0.0.1', 8099)) == 0 else 1)"; then
+            echo "::error::port 8099 is already in use; refusing to test against another server"
+            exit 1
+          fi
+          cd "$PROJECT/out"
+          python3 "$PROJECT/serve.py" 8099 >/dev/null 2>&1 &
+          SERVER_PID=$!
+          cd - >/dev/null
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 20); do
+            curl -sf -o /dev/null http://127.0.0.1:8099/index.html && break
+            sleep 1
+          done
+          # And confirm what is being served is the page just written, not a leftover.
+          if ! curl -sf http://127.0.0.1:8099/index.html | grep -q 'globalThis.ciThrow'; then
+            echo "::error::the server on 8099 is not serving this export"
+            exit 1
+          fi
+
+          BROWSER=""
+          for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              BROWSER=$(command -v "$candidate")
+              break
+            fi
+          done
+          if [ -z "$BROWSER" ]; then
+            echo "::error::no Chromium-based browser found on the runner"
+            exit 1
+          fi
+          echo "browser: $BROWSER"
+
+          # No --virtual-time-budget: compiling forty megabytes of wasm is real work, and a
+          # virtual clock runs out before the module instantiates, ending the page with
+          # nothing printed and no error.
+          "$BROWSER" --headless=new --no-sandbox --disable-gpu \
+            --use-gl=swiftshader --enable-unsafe-swiftshader \
+            --enable-logging=stderr --v=0 \
+            http://127.0.0.1:8099/index.html > browser.log 2>&1 &
+          BROWSER_PID=$!
+          for _ in $(seq 1 90); do
+            grep -q '\[ci\] ok' browser.log && break
+            sleep 2
+          done
+          kill "$BROWSER_PID" 2>/dev/null || true
+
+          echo "--- console ---"
+          sed -n 's/.*CONSOLE:[0-9]*\] //p' browser.log | sed 's/, source:.*//' || true
+          echo "---------------"
+
+          fail() {
+            echo "::error::$1"
+            echo "full browser log:"
+            tail -80 browser.log
+            exit 1
+          }
+          expect() {
+            grep -qF "$1" browser.log || fail "expected $2, but the page never printed: $1"
+          }
+
+          # Reaching the end at all means managed code ran, which is not a given: an
+          # unresolved internal call or a bad trampoline aborts before _Ready.
+          expect '[ci] ok' 'the script to run to completion'
+          expect '[ci] variant=hello/sn/np/1/2' 'pointer-sized interop returns to marshal correctly'
+          expect '[ci] turkish=İ' 'ICU to be loaded and cultures to be real'
+          expect '[ci] tz=-3' 'the bundled time zone database to be registered'
+          expect '[ci] jsexc=Error: boom|11' 'a [JSImport] exception to carry its exact message'
+          expect '[ci] jsexport=hello web' 'a declared [JSExport] to build and load'
+          expect '[ci] nuget=74a61aa4' 'a NuGet dependency to be published, packed and resolved'
+          expect '[ci] args=--ci-marker' 'the command line to reach managed code'
+          echo "all runtime assertions passed"

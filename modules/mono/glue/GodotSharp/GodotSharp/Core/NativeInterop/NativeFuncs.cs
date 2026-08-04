@@ -183,6 +183,47 @@ namespace Godot.NativeInterop
         public static partial godot_variant godotsharp_method_bind_call(IntPtr p_method_bind, IntPtr p_instance,
             godot_variant** p_args, int p_arg_count, out godot_variant_call_error p_call_error);
 
+        // These six cross the boundary through a pointer rather than by value, because
+        // their C# types hold one scalar and their C++ counterparts do not, and the
+        // WebAssembly C ABI returns those two shapes differently. The wrappers keep the
+        // by-value form for callers, where it costs nothing: the disagreement only exists
+        // at the native call.
+        public static godot_string godotsharp_variant_as_string(scoped in godot_variant p_self)
+        {
+            godotsharp_variant_as_string(p_self, out godot_string ret);
+            return ret;
+        }
+
+        public static godot_string_name godotsharp_variant_as_string_name(scoped in godot_variant p_self)
+        {
+            godotsharp_variant_as_string_name(p_self, out godot_string_name ret);
+            return ret;
+        }
+
+        public static godot_node_path godotsharp_variant_as_node_path(scoped in godot_variant p_self)
+        {
+            godotsharp_variant_as_node_path(p_self, out godot_node_path ret);
+            return ret;
+        }
+
+        public static Rid godotsharp_variant_as_rid(scoped in godot_variant p_self)
+        {
+            godotsharp_variant_as_rid(p_self, out Rid ret);
+            return ret;
+        }
+
+        public static godot_dictionary godotsharp_variant_as_dictionary(scoped in godot_variant p_self)
+        {
+            godotsharp_variant_as_dictionary(p_self, out godot_dictionary ret);
+            return ret;
+        }
+
+        public static godot_array godotsharp_variant_as_array(scoped in godot_variant p_self)
+        {
+            godotsharp_variant_as_array(p_self, out godot_array ret);
+            return ret;
+        }
+
         // variant.h
 
         public static partial void
@@ -245,7 +286,7 @@ namespace Godot.NativeInterop
 
         public static partial double godotsharp_variant_as_float(scoped in godot_variant p_self);
 
-        public static partial godot_string godotsharp_variant_as_string(scoped in godot_variant p_self);
+        public static partial void godotsharp_variant_as_string(scoped in godot_variant p_self, out godot_string r_dest);
 
         public static partial Vector2 godotsharp_variant_as_vector2(scoped in godot_variant p_self);
 
@@ -279,19 +320,19 @@ namespace Godot.NativeInterop
 
         public static partial Color godotsharp_variant_as_color(scoped in godot_variant p_self);
 
-        public static partial godot_string_name godotsharp_variant_as_string_name(scoped in godot_variant p_self);
+        public static partial void godotsharp_variant_as_string_name(scoped in godot_variant p_self, out godot_string_name r_dest);
 
-        public static partial godot_node_path godotsharp_variant_as_node_path(scoped in godot_variant p_self);
+        public static partial void godotsharp_variant_as_node_path(scoped in godot_variant p_self, out godot_node_path r_dest);
 
-        public static partial Rid godotsharp_variant_as_rid(scoped in godot_variant p_self);
+        public static partial void godotsharp_variant_as_rid(scoped in godot_variant p_self, out Rid r_dest);
 
         public static partial godot_callable godotsharp_variant_as_callable(scoped in godot_variant p_self);
 
         public static partial godot_signal godotsharp_variant_as_signal(scoped in godot_variant p_self);
 
-        public static partial godot_dictionary godotsharp_variant_as_dictionary(scoped in godot_variant p_self);
+        public static partial void godotsharp_variant_as_dictionary(scoped in godot_variant p_self, out godot_dictionary r_dest);
 
-        public static partial godot_array godotsharp_variant_as_array(scoped in godot_variant p_self);
+        public static partial void godotsharp_variant_as_array(scoped in godot_variant p_self, out godot_array r_dest);
 
         public static partial godot_packed_byte_array godotsharp_variant_as_packed_byte_array(scoped in godot_variant p_self);
 

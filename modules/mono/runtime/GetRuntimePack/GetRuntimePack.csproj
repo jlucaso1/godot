@@ -1,0 +1,61 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Imported explicitly: Directory.Build.props next to this file is empty on purpose. -->
+  <Import Project="..\..\WebRuntimeVersion.props" />
+  <!--
+    Published at engine build time to resolve the `browser-wasm` runtime pack and run
+    PInvokeTableGenerator over a known assembly closure. WebAssembly cannot synthesize
+    arbitrary-signature native calls at runtime, so those tables must exist ahead of time.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <OutputType>Exe</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <WasmBuildNative>true</WasmBuildNative>
+    <!--
+      A contract with the engine build: an exported C# project must use the same values,
+      or the two disagree at link time in ways that surface as unrelated-looking failures.
+    -->
+    <WasmEnableThreads>false</WasmEnableThreads>
+    <WasmEnableExceptionHandling>true</WasmEnableExceptionHandling>
+    <WasmEnableSIMD>true</WasmEnableSIMD>
+    <!--
+      Globalization matches what the engine links and initializes: ICU, not the invariant
+      tables, and not hybrid mode. Hybrid is what .NET's own browser host runs, and it
+      moves collation, casing and calendar data into JavaScript; the engine keeps them in
+      the linked ICU and only answers for locale display names, which ICU lacks here.
+      This project runs no managed code, but the switches decide which native libraries
+      the pack expects, so they have to agree with the engine's.
+    -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <HybridGlobalization>false</HybridGlobalization>
+    <!--
+      PInvokeTableGenerator only sees the published closure, and this project references
+      nothing. Trimmed, that is three assemblies, so the table it emits misses every
+      DllImport an actual game reaches and the first Console.WriteLine dies with
+      EntryPointNotFoundException. The engine template cannot know the game's code, so the
+      table has to cover the whole framework.
+    -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <!-- Single source is modules/mono/WebRuntimeVersion.props; see the note there. -->
+    <RuntimeFrameworkVersion>$(GodotWebRuntimeVersion)</RuntimeFrameworkVersion>
+  </PropertyGroup>
+
+  <!--
+    Godot's own managed assemblies, when the engine build has produced them. They are not
+    called from here; being in the published closure is the point. PInvokeTableGenerator
+    keys wasm_native_to_interp_map on <Assembly>_<Type>_<Method>, so Godot's
+    [UnmanagedCallersOnly] callbacks only get a trampoline if these exact assemblies are
+    present. Stubs declared in this project would produce keys naming this assembly, which
+    the runtime never looks up.
+
+    Optional on purpose: without them the template still builds, it just cannot enter
+    managed code.
+  -->
+  <ItemGroup Condition=" '$(GodotApiDir)' != '' ">
+    <Reference Include="$(GodotApiDir)/GodotSharp.dll" Condition="Exists('$(GodotApiDir)/GodotSharp.dll')" />
+    <Reference Include="$(GodotApiDir)/GodotPlugins.dll" Condition="Exists('$(GodotApiDir)/GodotPlugins.dll')" />
+  </ItemGroup>
+
+</Project>

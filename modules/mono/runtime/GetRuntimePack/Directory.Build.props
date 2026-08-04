@@ -1,0 +1,7 @@
+<Project>
+  <!--
+    Intentionally empty. MSBuild stops walking up at the first Directory.Build.props, so
+    this prevents inheriting modules/mono's, which imports SdkPackageVersions.props: a
+    file the engine build generates and which does not exist when this project publishes.
+  -->
+</Project>

@@ -1,0 +1,103 @@
+<Project>
+  <!--
+    Web-specific build properties. Imported after Microsoft.NET.Sdk, because the
+    WebAssembly SDK unconditionally forces OutputType to Exe, which does not suit a Godot
+    game assembly: it is a library the engine loads, with no entry point.
+
+    There is no app bundle to generate and no native runtime to build either: the Web
+    export template already has the Mono runtime statically linked in, so publishing only
+    has to produce the managed payload.
+  -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+
+    <!--
+      Trimming is off, and not merely unconfigured. It would be worth having here, since
+      the whole managed payload is downloaded by the player, but it cannot be combined
+      with the library output above: Microsoft.NET.ILLink.targets unconditionally adds
+      the project's own assembly as a root in EntryPoint mode, and a library has no entry
+      point, so the publish fails with IL1034 no matter what roots are configured
+      alongside it. Trimming this payload means giving the game assembly an entry point
+      it does not have, or relinking the runtime per project, which would put the
+      emscripten toolchain in every exporting user's path.
+    -->
+    <PublishTrimmed>false</PublishTrimmed>
+
+    <!--
+      Library output turns off the SDK's default generation of
+      <assembly>.runtimeconfig.json, which is where gd_mono.cpp reads the project's
+      AppContext switches from at startup. Godot's own project template gets it back
+      through EnableDynamicLoading, but only incidentally: said here so that a project
+      which drops that property does not silently lose its runtime configuration, and
+      on Web alone at that.
+    -->
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <WasmGenerateAppBundle>false</WasmGenerateAppBundle>
+    <WasmBuildNative>false</WasmBuildNative>
+    <WasmEnableWebcil>false</WasmEnableWebcil>
+
+    <!--
+      The runtime pack ships a threaded and an unthreaded flavor of the class libraries,
+      and the template is linked against the unthreaded one: the threaded runtime drives
+      its worker threads from JavaScript that Godot does not ship.
+
+      Neither InvariantGlobalization nor InvariantTimezone is forwarded to the WebAssembly
+      SDK; both are answered below instead, for the reason given there.
+    -->
+    <WasmEnableThreads>false</WasmEnableThreads>
+
+    <!--
+      The template was built against one specific servicing version of the runtime pack,
+      and its P/Invoke table names symbols in that pack's native libraries. The value comes
+      from SdkPackageVersions.props, which the engine build generates from
+      modules/mono/WebRuntimeVersion.props.
+    -->
+    <RuntimeFrameworkVersion>$(GodotWebRuntimeVersion)</RuntimeFrameworkVersion>
+  </PropertyGroup>
+
+
+  <!--
+    A project setting InvariantGlobalization is asking about behavior, but the WebAssembly
+    SDK reads it as a request to relink the runtime and refuses to publish against a
+    template that does not relink. Forwarding it fails the export outright with
+    "WasmBuildNative is required because InvariantGlobalization=true", which is what a
+    perfectly ordinary project gets today just for asking not to carry ICU.
+
+    So it is answered here rather than forwarded: the request is recorded as the AppContext
+    switch it ultimately means, which gd_mono.cpp reads back out of the published
+    runtimeconfig.json and hands to the runtime, while the SDK sees the default it expects.
+    The same for InvariantTimezone. The project still gets what it asked for; the SDK is
+    just no longer asked to relink for it.
+  -->
+  <PropertyGroup>
+    <_GodotWebInvariantGlobalization>$(InvariantGlobalization)</_GodotWebInvariantGlobalization>
+    <_GodotWebInvariantTimezone>$(InvariantTimezone)</_GodotWebInvariantTimezone>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <InvariantTimezone>false</InvariantTimezone>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.Globalization.Invariant"
+                                    Value="true"
+                                    Condition=" '$(_GodotWebInvariantGlobalization)' == 'true' " />
+    <RuntimeHostConfigurationOption Include="System.TimeZoneInfo.Invariant"
+                                    Value="true"
+                                    Condition=" '$(_GodotWebInvariantTimezone)' == 'true' " />
+  </ItemGroup>
+
+  <!--
+    Projects created before Web export existed target net8.0 unconditionally, and a
+    self-contained browser-wasm publish of one selects the .NET 8 class libraries. The
+    export template has exactly one runtime pack linked into it, and the interop tables
+    beside it were generated from that pack's class libraries, so the two link and then
+    disagree at the first managed call with "runtime and class libraries are out of sync".
+
+    GodotTargetPlatform is only known after Microsoft.NET.Sdk has read the target
+    framework, so this cannot be corrected here, only reported.
+  -->
+  <Target Name="GodotCheckWebTargetFramework" BeforeTargets="Build;Publish">
+    <Error Condition=" '$(TargetFramework)' != 'net9.0' "
+           Text="Exporting to Web requires TargetFramework 'net9.0', but this project resolved '$(TargetFramework)'. Add the following to the project's main PropertyGroup: &lt;TargetFramework Condition=&quot; '%24(GodotTargetPlatform)' == 'web' &quot;&gt;net9.0&lt;/TargetFramework&gt;" />
+  </Target>
+
+</Project>

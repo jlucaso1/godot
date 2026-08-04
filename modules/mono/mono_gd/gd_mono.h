@@ -43,9 +43,19 @@
 #endif
 #endif
 
+// The Web template cannot enter through the source-generated GodotPlugins.Game.Main.
+// WebAssembly needs an ahead-of-time trampoline for each [UnmanagedCallersOnly] method,
+// generated from the assembly the method lives in; for GodotPlugins.Game.Main that is the
+// game's own assembly, which does not exist when the export template is built. It uses
+// GodotPlugins.Main::InitializeFromEngine instead, which lives in an assembly the template
+// does know, and therefore needs the same plugin callbacks the editor uses.
+#if defined(TOOLS_ENABLED) || defined(WEB_ENABLED)
+#define GD_MONO_PLUGIN_CALLBACKS
+#endif
+
 namespace gdmono {
 
-#ifdef TOOLS_ENABLED
+#ifdef GD_MONO_PLUGIN_CALLBACKS
 struct PluginCallbacks {
 	using FuncLoadProjectAssemblyCallback = bool(GD_CLR_STDCALL *)(const char16_t *, String *);
 	using FuncLoadToolsAssemblyCallback = Object *(GD_CLR_STDCALL *)(const char16_t *, const void **, int32_t);
@@ -72,8 +82,10 @@ class GDMono {
 	int project_load_failure_count = 0;
 #endif
 
-#ifdef TOOLS_ENABLED
+#ifdef GD_MONO_PLUGIN_CALLBACKS
 	bool _load_project_assembly();
+#endif
+#ifdef TOOLS_ENABLED
 	void _try_load_project_assembly();
 #endif
 
@@ -85,7 +97,7 @@ class GDMono {
 #endif
 	void _init_godot_api_hashes();
 
-#ifdef TOOLS_ENABLED
+#ifdef GD_MONO_PLUGIN_CALLBACKS
 	gdmono::PluginCallbacks plugin_callbacks;
 #endif
 

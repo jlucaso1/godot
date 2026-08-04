@@ -1,0 +1,18 @@
+<Project>
+  <!--
+    The .NET runtime pack the Web export template is built against.
+
+    Two things have to agree on it. The engine links that pack's static archives and the
+    P/Invoke table generated beside them, which names symbols in that pack's native
+    libraries; an exported project publishes class libraries and has to publish the same
+    pack's. "net9.0" alone does not say which servicing version, and a self-contained
+    publish takes whichever one the machine happens to resolve, so the version is pinned.
+
+    GetRuntimePack.csproj imports this file directly. build_assemblies.py copies the value
+    into the generated SdkPackageVersions.props, which ships inside Godot.NET.Sdk, so
+    exported projects read the same number without it being written down twice.
+  -->
+  <PropertyGroup>
+    <GodotWebRuntimeVersion>9.0.18</GodotWebRuntimeVersion>
+  </PropertyGroup>
+</Project>
