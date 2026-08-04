@@ -14,6 +14,12 @@ namespace GodotTools.ProjectEditor
 
         public static string GodotMinimumRequiredTfm => "net8.0";
 
+        /// <summary>
+        /// Web exports have to match the runtime pack the export template links, which is
+        /// newer than the minimum the other platforms accept.
+        /// </summary>
+        public static string GodotWebRequiredTfm => "net9.0";
+
         public static ProjectRootElement GenGameProject(string name)
         {
             if (name.Length == 0)
@@ -29,6 +35,13 @@ namespace GodotTools.ProjectEditor
             // Non-gradle builds require .NET 9 to match the jar libraries included in the export template.
             var net9 = mainGroup.AddProperty("TargetFramework", "net9.0");
             net9.Condition = " '$(GodotTargetPlatform)' == 'android' ";
+
+            // The Web template statically links one exact `browser-wasm` runtime pack, and the
+            // interop tables generated beside it only fit that pack's BCL. Publishing against
+            // an older one links cleanly and then reports the runtime and class libraries as
+            // out of sync at the first managed call.
+            var webTfm = mainGroup.AddProperty("TargetFramework", GodotWebRequiredTfm);
+            webTfm.Condition = " '$(GodotTargetPlatform)' == 'web' ";
 
             mainGroup.AddProperty("EnableDynamicLoading", "true");
 
