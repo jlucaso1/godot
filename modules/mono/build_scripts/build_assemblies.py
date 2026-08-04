@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import os.path
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -280,8 +281,6 @@ def generate_sdk_package_versions():
 
         # If version was overridden to be e.g. "beta3", we insert a dot between
         # "beta" and "3" to follow SemVer 2.0.
-        import re
-
         match = re.search(r"[\d]+$", version_status)
         if match:
             pos = match.start()
@@ -316,8 +315,17 @@ def generate_sdk_package_versions():
         + [f"GODOT{version.major}_{version.minor}_{v}_OR_GREATER" for v in range(0, version.patch + 1)]
     )
 
+    # Read rather than repeated, so the Web runtime pack version lives in exactly one place.
+    web_runtime_version_path = os.path.join(dirname(script_path), "WebRuntimeVersion.props")
+    with open(web_runtime_version_path, "r", encoding="utf-8") as f:
+        match = re.search(r"<GodotWebRuntimeVersion>([^<]+)</GodotWebRuntimeVersion>", f.read())
+    if match is None:
+        raise RuntimeError(f"No GodotWebRuntimeVersion in {web_runtime_version_path}")
+    web_runtime_version_str = match.group(1)
+
     props = f"""<Project>
   <PropertyGroup>
+    <GodotWebRuntimeVersion>{web_runtime_version_str}</GodotWebRuntimeVersion>
     <PackageVersion_GodotSharp>{godotsharp_version_str}</PackageVersion_GodotSharp>
     <PackageVersion_Godot_NET_Sdk>{godotsharp_version_str}</PackageVersion_Godot_NET_Sdk>
     <PackageVersion_Godot_SourceGenerators>{godotsharp_version_str}</PackageVersion_Godot_SourceGenerators>
