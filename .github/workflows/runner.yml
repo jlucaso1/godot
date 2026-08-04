@@ -54,3 +54,9 @@ jobs:
     needs: static-checks
     if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
     uses: ./.github/workflows/web_builds.yml
+
+  web-dotnet-build:
+    name: 🌐 Web .NET
+    needs: static-checks
+    if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
+    uses: ./.github/workflows/web_dotnet_builds.yml
