@@ -180,9 +180,12 @@ private:
 		String arch = Engine::get_singleton()->get_architecture_name();
 		String appname_safe = Path::get_csharp_project_name();
 		String packed_path = "res://.godot/mono/publish/" + arch;
-#ifdef ANDROID_ENABLED
+#if defined(ANDROID_ENABLED) || defined(WEB_ENABLED)
+		// Read straight out of the pck. Extracting to a cache directory is pointless on
+		// Web, where there is no persistent one to extract to, and the assembly preload
+		// hook in gd_mono.cpp reads from the pck anyway.
 		api_assemblies_dir = packed_path;
-		print_verbose(".NET: Android platform detected. Setting api_assemblies_dir directly to pck path: " + api_assemblies_dir);
+		print_verbose(".NET: Reading assemblies directly from the pck path: " + api_assemblies_dir);
 #else
 		if (DirAccess::exists(packed_path)) {
 			// The dotnet publish data is packed in the pck/zip.

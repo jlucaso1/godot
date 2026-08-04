@@ -8,7 +8,7 @@ namespace GodotPlugins
 {
     public class PluginLoadContext : AssemblyLoadContext
     {
-        private readonly AssemblyDependencyResolver _resolver;
+        private readonly AssemblyDependencyResolver? _resolver;
         private readonly ICollection<string> _sharedAssemblies;
         private readonly AssemblyLoadContext _mainLoadContext;
 
@@ -18,7 +18,18 @@ namespace GodotPlugins
             AssemblyLoadContext mainLoadContext, bool isCollectible)
             : base(isCollectible)
         {
-            _resolver = new AssemblyDependencyResolver(pluginPath);
+            try
+            {
+                _resolver = new AssemblyDependencyResolver(pluginPath);
+            }
+            catch (PlatformNotSupportedException)
+            {
+                // browser-wasm has no host policy to read the plugin's .deps.json through, so
+                // constructing the resolver throws outright. There the whole managed payload is
+                // already on the default context's list of trusted platform assemblies, so
+                // returning null from Load and letting that context resolve is correct.
+                _resolver = null;
+            }
             _sharedAssemblies = sharedAssemblies;
             _mainLoadContext = mainLoadContext;
 
@@ -51,7 +62,7 @@ namespace GodotPlugins
             if (_sharedAssemblies.Contains(assemblyName.Name))
                 return _mainLoadContext.LoadFromAssemblyName(assemblyName);
 
-            string? assemblyPath = _resolver.ResolveAssemblyToPath(assemblyName);
+            string? assemblyPath = _resolver?.ResolveAssemblyToPath(assemblyName);
             if (assemblyPath != null)
             {
                 AssemblyLoadedPath = assemblyPath;
@@ -74,7 +85,7 @@ namespace GodotPlugins
 
         protected override IntPtr LoadUnmanagedDll(string unmanagedDllName)
         {
-            string? libraryPath = _resolver.ResolveUnmanagedDllToPath(unmanagedDllName);
+            string? libraryPath = _resolver?.ResolveUnmanagedDllToPath(unmanagedDllName);
             if (libraryPath != null)
                 return LoadUnmanagedDllFromPath(libraryPath);
 
