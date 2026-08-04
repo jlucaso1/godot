@@ -48,6 +48,10 @@
 #include "modules/modules_enabled.gen.h" // IWYU pragma: keep. For mono.
 #include "modules/svg/image_loader_svg.h"
 
+#ifdef MODULE_MONO_ENABLED
+#include "modules/mono/utils/path_utils.h"
+#endif
+
 Error EditorExportPlatformWeb::_extract_template(const String &p_template, const String &p_dir, const String &p_name, bool pwa) {
 	Ref<FileAccess> io_fa;
 	zlib_filefunc_def io = zipio_create_io(&io_fa);
@@ -422,17 +426,37 @@ Ref<Texture2D> EditorExportPlatformWeb::get_logo() const {
 }
 
 bool EditorExportPlatformWeb::has_valid_export_configuration(const Ref<EditorExportPreset> &p_preset, String &r_error, bool &r_missing_templates, bool p_debug) const {
-#ifdef MODULE_MONO_ENABLED
-	// Don't check for additional errors, as this particular error cannot be resolved.
-	r_error += TTR("Exporting to Web is currently not supported in Godot 4 when using C#/.NET. Use Godot 3 to target Web with C#/Mono instead.") + "\n";
-	r_error += TTR("If this project does not use C#, use a non-C# editor build to export the project.") + "\n";
-	return false;
-#else
-
 	String err;
+
 	bool valid = false;
+
 	bool extensions = (bool)p_preset->get("variant/extensions_support");
 	bool thread_support = (bool)p_preset->get("variant/thread_support");
+
+#ifdef MODULE_MONO_ENABLED
+	// Neither variant can carry the .NET runtime. Its threaded flavor drives worker threads
+	// from JavaScript the engine does not ship, and it is not position-independent code, so
+	// it cannot go in the side module GDExtension support needs. Reported together and
+	// before the template check, since installing a template resolves neither.
+	//
+	// Only for projects that actually carry C#, rather than for every project a .NET editor
+	// opens: a GDScript-only one packages no managed payload and so needs nothing from the
+	// runtime, and with a custom template it can use either variant freely. Detected from
+	// the project file, as platform/android detects the same thing.
+	const String csproj_path = ProjectSettings::get_singleton()->globalize_path(
+			"res://" + Path::get_csharp_project_name() + ".csproj");
+	if (FileAccess::exists(csproj_path) && (thread_support || extensions)) {
+		if (thread_support) {
+			err += TTR("C#/.NET Web exports do not support threads: the .NET runtime's threaded WebAssembly build drives its worker threads from JavaScript that Godot does not ship.") + "\n";
+		}
+		if (extensions) {
+			err += TTR("C#/.NET Web exports do not support GDExtensions, because the .NET runtime is not built as position-independent code.") + "\n";
+		}
+		r_error = err;
+		r_missing_templates = false;
+		return false;
+	}
+#endif // MODULE_MONO_ENABLED
 
 	// Look for export templates (first official, and if defined custom templates).
 	bool dvalid = exists_export_template(_get_template_name(extensions, thread_support, true), &err);
@@ -459,7 +483,6 @@ bool EditorExportPlatformWeb::has_valid_export_configuration(const Ref<EditorExp
 	}
 
 	return valid;
-#endif // !MODULE_MONO_ENABLED
 }
 
 bool EditorExportPlatformWeb::has_valid_project_configuration(const Ref<EditorExportPreset> &p_preset, String &r_error) const {
